@@ -187,8 +187,7 @@ class LearnerImpl : public Learner {
 
     if (!this->ModelInitialized()) {
       mparam.InitAllowUnknown(args);
-      name_obj_ = cfg_["objective"];
-      name_gbm_ = cfg_["booster"];
+      name_obj_ = cfg_["objective"]; name_gbm_ = cfg_["booster"];
     }
 
     common::GlobalRandom().seed(tparam.seed);
@@ -215,6 +214,7 @@ class LearnerImpl : public Learner {
     // backward compatible header check.
     std::string header;
     header.resize(4);
+    // 看来现在只支持 binf 这一种文件格式了。 直接跳过头部
     if (fp.PeekRead(&header[0], 4) == 4) {
       CHECK_NE(header, "bs64")
           << "Base64 format is no longer supported in brick.";
@@ -225,31 +225,41 @@ class LearnerImpl : public Learner {
     // use the peekable reader.
     fi = &fp;
     // read parameter
+    // 先读头部的参数 struct
     CHECK_EQ(fi->Read(&mparam, sizeof(mparam)), sizeof(mparam))
         << "BoostLearner: wrong model format";
     {
       // backward compatibility code for compatible with old model type
       // for new model, Read(&name_obj_) is suffice
+      // 读出来一个 uint64_t
       uint64_t len;
       CHECK_EQ(fi->Read(&len, sizeof(len)), sizeof(len));
       if (len >= std::numeric_limits<unsigned>::max()) {
+        // 对于特别大的 len，再多读一个 int，然后把 len 右移 32bit
         int gap;
         CHECK_EQ(fi->Read(&gap, sizeof(gap)), sizeof(gap))
             << "BoostLearner: wrong model format";
         len = len >> static_cast<uint64_t>(32UL);
       }
+      // 读出字符串长度，再读出字符串
       if (len != 0) {
         name_obj_.resize(len);
         CHECK_EQ(fi->Read(&name_obj_[0], len), len)
             <<"BoostLearner: wrong model format";
       }
     }
+    // XXX(lisendong) 这个里面一样，是先读一个 uint64_t, 再读 string 出来
+    // 见 include/dmlc/serializer.h 164行
     CHECK(fi->Read(&name_gbm_))
         << "BoostLearner: wrong model format";
     // duplicated code with LazyInitModel
+    // 只是通过名字构造出来对象
     obj_.reset(ObjFunction::Create(name_obj_));
     gbm_.reset(GradientBooster::Create(name_gbm_));
+    // 这个函数是重量级的函数了，读了很多东西, 直接 load
+    // xgboost/src/gbm/gbtree.cc 115行
     gbm_->Load(fi);
+    LOG(CONSOLE) << "contain_extra_attrs=" << mparam.contain_extra_attrs;
     if (mparam.contain_extra_attrs != 0) {
       std::vector<std::pair<std::string, std::string> > attr;
       fi->Read(&attr);
@@ -260,7 +270,10 @@ class LearnerImpl : public Learner {
       metrics_.emplace_back(Metric::Create(obj_->DefaultEvalMetric()));
     }
     this->base_score_ = mparam.base_score;
+    // 这里似乎还会设置一下 pred_buffer_size_
+    // 但是实际运行发现这里设置的都是0，后面再仔细看一下这里的逻辑好了
     gbm_->ResetPredBuffer(pred_buffer_size_);
+    LOG(CONSOLE) << "pred_buffer_size_=" << pred_buffer_size_;
     cfg_["num_class"] = common::ToString(mparam.num_class);
     cfg_["num_feature"] = common::ToString(mparam.num_feature);
     obj_->Configure(cfg_.begin(), cfg_.end());
@@ -280,14 +293,22 @@ class LearnerImpl : public Learner {
   }
 
   void UpdateOneIter(int iter, DMatrix* train) override {
+    // 注意！ 这里调用过一次 init 了
     CHECK(ModelInitialized())
         << "Always call InitModel or LoadModel before update";
     if (tparam.seed_per_iteration || rabit::IsDistributed()) {
       common::GlobalRandom().seed(tparam.seed * kRandSeedMagic + iter);
     }
     this->LazyInitDMatrix(train);
+    // 先用已有模型预测一下
     this->PredictRaw(train, &preds_);
+    // std::unique_ptr<ObjFunction> obj_; 先算梯度
+    // std::vector<bst_gpair> gpair_; gradient pairs.  bst_gpair : (gradient, hess) pair
+    // 每一条样本对应返回一个 bst_gpair，所以返回的 gpair_ size 就是 train data 的 size
+    // new RegLossObj<LogisticClassification>(); objective/regression_obj.cc 这是 binary:logistic 选项对应的 Objective
     obj_->GetGradient(preds_, train->info(), iter, &gpair_);
+    // std::unique_ptr<GradientBooster> gbm_; 再做 boost 
+    // gbm/gbtree.cc new GBTree(); 如果选择 gbtree 作为 booster，请看这个类
     gbm_->DoBoost(train, this->FindBufferOffset(train), &gpair_);
   }
 

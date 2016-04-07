@@ -169,10 +169,12 @@ class Learner : public rabit::Serializable {
 };
 
 // implementation of inline functions.
+// online predict，一次性只预测一条样本 !!!
 inline void Learner::Predict(const SparseBatch::Inst& inst,
                              bool output_margin,
                              std::vector<float>* out_preds,
                              unsigned ntree_limit) const {
+  // 调用的也是 gbtree 的预测单条样本的接口 ！！！
   gbm_->Predict(inst, out_preds, ntree_limit);
   if (out_preds->size() == 1) {
     (*out_preds)[0] += base_score_;

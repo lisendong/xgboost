@@ -16,6 +16,7 @@ GradientBooster* GradientBooster::Create(const std::string& name) {
   if (e == nullptr) {
     LOG(FATAL) << "Unknown gbm type " << name;
   }
+  // 调用一下工厂函数
   return (e->body)();
 }
 }  // namespace xgboost

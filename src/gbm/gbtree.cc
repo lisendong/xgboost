@@ -58,6 +58,7 @@ struct GBTreeModelParam : public dmlc::Parameter<GBTreeModelParam> {
   /*! \brief pad this space, for backward compatiblity reason.*/
   int pad_32bit;
   /*! \brief deprecated padding space. */
+  // 这个直接 deprecated 了
   int64_t num_pbuffer_deprecated;
   /*!
    * \brief how many output group a single instance can produce
@@ -130,6 +131,7 @@ class GBTree : public GradientBooster {
     this->cfg.push_back(std::make_pair(std::string("num_feature"),
                                        common::ToString(mparam.num_feature)));
     // clear the predict buffer.
+    CHECK_EQ(num_pbuffer, 0);
     this->ResetPredBuffer(num_pbuffer);
   }
 
@@ -164,6 +166,8 @@ class GBTree : public GradientBooster {
     std::vector<std::vector<std::unique_ptr<RegTree> > > new_trees;
     if (mparam.num_output_group == 1) {
       std::vector<std::unique_ptr<RegTree> > ret;
+      // buffer_offset 是 -1 ？
+      // 如果只预测一个 label，那 group id 直接设置为 0
       BoostNewTrees(gpair, p_fmat, buffer_offset, 0, &ret);
       new_trees.push_back(std::move(ret));
     } else {
@@ -270,7 +274,10 @@ class GBTree : public GradientBooster {
     if (updaters.size() != 0) return;
     std::string tval = tparam.updater_seq;
     std::vector<std::string> ups = common::Split(tval, ',');
+    LOG(INFO) << "tval:" << tval;
+    // tval: grow_histmaker,prune 这里剪枝也是个 updater, 多个 updater 可以顺序串行作用
     for (const std::string& pstr : ups) {
+      // 这里会有多个 updater ？
       std::unique_ptr<TreeUpdater> up(TreeUpdater::Create(pstr.c_str()));
       up->Init(this->cfg);
       updaters.push_back(std::move(up));
@@ -287,6 +294,9 @@ class GBTree : public GradientBooster {
     std::vector<RegTree*> new_trees;
     ret->clear();
     // create the trees
+    // 这里会一次 create 出多棵树？
+    LOG(INFO) << "num_parallel_tree:" << tparam.num_parallel_tree;
+    // 这里 对于 gbrt num_parallel_tree = 1，对于随机森林这里的参数可以大于 1
     for (int i = 0; i < tparam.num_parallel_tree; ++i) {
       std::unique_ptr<RegTree> ptr(new RegTree());
       ptr->param.InitAllowUnknown(this->cfg);
@@ -295,7 +305,9 @@ class GBTree : public GradientBooster {
       ret->push_back(std::move(ptr));
     }
     // update the trees
+    // tree/updater_histmaker.cc 890行 GlobalProposalHistMaker<GradStats>
     for (auto& up : updaters) {
+      // 对新树的学习主要是这个函数了
       up->Update(gpair, p_fmat, new_trees);
     }
     // optimization, update buffer, if possible

@@ -31,9 +31,11 @@ void SimpleCSRSource::CopyFrom(DMatrix* src) {
   }
 }
 
+// 函数调用的是 parser 的 Next 和 Value 方法，不断读 block 出来
 void SimpleCSRSource::CopyFrom(dmlc::Parser<uint32_t>* parser) {
   this->Clear();
   while (parser->Next()) {
+    // parser 一次返回一批样本
     const dmlc::RowBlock<uint32_t>& batch = parser->Value();
     if (batch.label != nullptr) {
       info.labels.insert(info.labels.end(), batch.label, batch.label + batch.size);
@@ -42,16 +44,19 @@ void SimpleCSRSource::CopyFrom(dmlc::Parser<uint32_t>* parser) {
       info.weights.insert(info.weights.end(), batch.weight, batch.weight + batch.size);
     }
     CHECK(batch.index != nullptr);
-    // update information
+    // update information, 总的样本数
     this->info.num_row += batch.size;
     // copy the data over
     for (size_t i = batch.offset[0]; i < batch.offset[batch.size]; ++i) {
       uint32_t index = batch.index[i];
       bst_float fvalue = batch.value == nullptr ? 1.0f : batch.value[i];
+      // 稀疏存储方式 featureId, fvalue
       row_data_.push_back(SparseBatch::Entry(index, fvalue));
+      // 存储的全局的最大特征编号
       this->info.num_col = std::max(this->info.num_col,
                                     static_cast<uint64_t>(index + 1));
     }
+    // 初始化的时候: row_ptr_.resize(1); row_ptr_[0] = 0;
     size_t top = row_ptr_.size();
     for (size_t i = 0; i < batch.size; ++i) {
       row_ptr_.push_back(row_ptr_[top - 1] + batch.offset[i + 1] - batch.offset[0]);

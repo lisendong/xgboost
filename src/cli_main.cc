@@ -150,12 +150,15 @@ struct CLIParam : public dmlc::Parameter<CLIParam> {
 
 DMLC_REGISTER_PARAMETER(CLIParam);
 
+
+// 训练的时候调用的 main 函数
 void CLITrain(const CLIParam& param) {
   if (rabit::IsDistributed()) {
     std::string pname = rabit::GetProcessorName();
-    LOG(CONSOLE) << "start " << pname << ":" << rabit::GetRank();
+    LOG(CONSOLE) << "train xxx start " << pname << ":" << rabit::GetRank();
   }
   // load in data.
+  // 最开始调用的是 DMatrix 的 Load 函数
   std::unique_ptr<DMatrix> dtrain(
       DMatrix::Load(param.train_path, param.silent != 0, param.dsplit == 2));
   std::vector<std::unique_ptr<DMatrix> > deval;
@@ -195,6 +198,7 @@ void CLITrain(const CLIParam& param) {
       if (param.silent == 0) {
         LOG(CONSOLE) << "boosting round " << i << ", " << elapsed << " sec elapsed";
       }
+      // 这个应该就是学习的核心函数了
       learner->UpdateOneIter(i, dtrain.get());
       if (learner->AllowLazyCheckPoint()) {
         rabit::LazyCheckPoint(learner.get());
@@ -217,6 +221,7 @@ void CLITrain(const CLIParam& param) {
     if (param.save_period != 0 &&
         (i + 1) % param.save_period == 0 &&
         rabit::GetRank() == 0) {
+      // 只有节点 0 负责 save model
       std::ostringstream os;
       os << param.model_dir << '/'
          << std::setfill('0') << std::setw(4)
@@ -237,7 +242,7 @@ void CLITrain(const CLIParam& param) {
   // always save final round
   if ((param.save_period == 0 || param.num_round % param.save_period != 0) &&
       param.model_out != "NONE" &&
-      rabit::GetRank() == 0) {
+      rabit::GetRank() == 0) { // 只有 getRank() == 0 的负责写模型
     std::ostringstream os;
     if (param.model_out == "NULL") {
       os << param.model_dir << '/'
@@ -307,6 +312,7 @@ void CLIPredict(const CLIParam& param) {
   if (param.silent == 0) {
     LOG(CONSOLE) << "writing prediction to " << param.name_pred;
   }
+  // 这里写得好粗糙哦，支不支持 hdfs 是个问题。。。
   std::unique_ptr<dmlc::Stream> fo(
       dmlc::Stream::Create(param.name_pred.c_str(), "w"));
   dmlc::ostream os(fo.get());

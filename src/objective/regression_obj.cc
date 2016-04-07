@@ -34,6 +34,7 @@ struct LogisticRegression {
   static bool CheckLabel(float x) { return x >= 0.0f && x <= 1.0f; }
   static float FirstOrderGradient(float predt, float label) { return predt - label; }
   static float SecondOrderGradient(float predt, float label) {
+    // 这里取了一个 1e-16 的最小值
     const float eps = 1e-16f;
     return std::max(predt * (1.0f - predt), eps);
   }
@@ -48,6 +49,7 @@ struct LogisticRegression {
   static const char* DefaultEvalMetric() { return "rmse"; }
 };
 // logistic loss for binary classification task.
+// 注意！ LogisticClassification 和 LogisticRegression 的区别仅仅在于默认评估方式的不同，其他完全相同
 struct LogisticClassification : public LogisticRegression {
   static const char* DefaultEvalMetric() { return "error"; }
 };
@@ -97,11 +99,13 @@ class RegLossObj : public ObjFunction {
     const omp_ulong ndata = static_cast<omp_ulong>(preds.size());
     #pragma omp parallel for schedule(static)
     for (omp_ulong i = 0; i < ndata; ++i) {
+      // 做个变换，其实就是 logistic regression 需要取个 sigmoid 变换之类的
       float p = Loss::PredTransform(preds[i]);
       float w = info.GetWeight(i);
+      // 这里正样本的权重是直接乘上去的。。。
       if (info.labels[i] == 1.0f) w *= param_.scale_pos_weight;
       if (!Loss::CheckLabel(info.labels[i])) label_correct = false;
-      out_gpair->at(i) = bst_gpair(Loss::FirstOrderGradient(p, info.labels[i]) * w,
+      out_gpair->at(i) = bst_gpair(Loss::FirstOrderGradient(p, info.labels[i]) * w,  // 样本权重是直接乘在 G 和 H 上的
                                    Loss::SecondOrderGradient(p, info.labels[i]) * w);
     }
     if (!label_correct) {

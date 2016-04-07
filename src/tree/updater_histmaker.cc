@@ -122,6 +122,7 @@ class HistMaker: public BaseMaker {
   // set of working features
   std::vector<bst_uint> fwork_set;
   // update function implementation
+  // 单棵树的 Update
   virtual void Update(const std::vector<bst_gpair> &gpair,
                       DMatrix *p_fmat,
                       RegTree *p_tree) {

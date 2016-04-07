@@ -137,11 +137,13 @@ void MetaInfo::SetInfo(const char* key, const void* dptr, DataType dtype, size_t
 }
 
 
+// main 函数核心入口
 DMatrix* DMatrix::Load(const std::string& uri,
                        bool silent,
                        bool load_row_split,
                        const std::string& file_format) {
   std::string fname, cache_file;
+  LOG(INFO) << "file_format:" << file_format;
   size_t dlm_pos = uri.find('#');
   if (dlm_pos != std::string::npos) {
     cache_file = uri.substr(dlm_pos + 1, uri.length());
@@ -205,9 +207,12 @@ DMatrix* DMatrix::Load(const std::string& uri,
 
   std::string ftype = file_format;
   if (file_format == "auto") ftype = "libsvm";
+  // 先根据输入文件目录和文件格式，搞出一个 parser
   std::unique_ptr<dmlc::Parser<uint32_t> > parser(
       dmlc::Parser<uint32_t>::Create(fname.c_str(), partid, npart, file_format.c_str()));
+  // 根据 parser 直接生成 DMatrix
   DMatrix* dmat = DMatrix::Create(parser.get(), cache_file);
+  // XXX(lisendong) 这里只有第一个节点是打 log 的，其他节点都是 silent
   if (!silent) {
     LOG(CONSOLE) << dmat->info().num_row << 'x' << dmat->info().num_col << " matrix with "
                  << dmat->info().num_nonzero << " entries loaded from " << uri;
@@ -227,10 +232,12 @@ DMatrix* DMatrix::Load(const std::string& uri,
   return dmat;
 }
 
+// 注意！ 这里用了 SimpleCSRSource
 DMatrix* DMatrix::Create(dmlc::Parser<uint32_t>* parser,
                          const std::string& cache_prefix) {
   if (cache_prefix.length() == 0) {
     std::unique_ptr<data::SimpleCSRSource> source(new data::SimpleCSRSource());
+    // 这里面调用了 parser 的 Next() 和 Value() 方法把数据逐个 block 都读进内存
     source->CopyFrom(parser);
     return DMatrix::Create(std::move(source), cache_prefix);
   } else {
@@ -254,6 +261,7 @@ void DMatrix::SaveToLocalFile(const std::string& fname) {
   source.SaveBinary(fo.get());
 }
 
+// 这个就是真正干活的函数了, 可以看到它返回的是一个 SimpleDMatrix (why, also "simple") ?
 DMatrix* DMatrix::Create(std::unique_ptr<DataSource>&& source,
                          const std::string& cache_prefix) {
   if (cache_prefix.length() == 0) {
