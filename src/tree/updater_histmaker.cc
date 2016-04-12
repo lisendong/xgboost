@@ -122,32 +122,43 @@ class HistMaker: public BaseMaker {
   // set of working features
   std::vector<bst_uint> fwork_set;
   // update function implementation
-  // 单棵树的 Update
+  // 单棵树的 Update 核心代码
   virtual void Update(const std::vector<bst_gpair> &gpair,
                       DMatrix *p_fmat,
                       RegTree *p_tree) {
     this->InitData(gpair, *p_fmat, *p_tree);
+    // 只是把 fwork_set 数组 fwork_set[i] = i; 
     this->InitWorkSet(p_fmat, *p_tree, &fwork_set);
-    // mark root node as fresh.
+    // mark root node as fresh. (fresh 的概念是？）
+    // num_roots = 1
     for (int i = 0; i < p_tree->param.num_roots; ++i) {
       (*p_tree)[i].set_leaf(0.0f, 0);
     }
 
+    // 一层一层搞？
     for (int depth = 0; depth < param.max_depth; ++depth) {
       // reset and propose candidate split
+      // 注意！root 节点计算分割点的时候，有一次 allReduce 操作
+      // proposing potential good split points (quantile sketch)
       this->ResetPosAndPropose(gpair, p_fmat, fwork_set, *p_tree);
       // create histogram
+      // 这里面有一次直方图的 allReduce 操作
+      // accumulating histograms to only evaluate the solution on these proposed splits. (histogram)
+      // linear time construction of both the quantile sketch and histogram
+      // 这里用到了所谓的 “Cache-aware Prefetch” 的 trick
       this->CreateHist(gpair, p_fmat, fwork_set, *p_tree);
       // find split based on histogram statistics
       this->FindSplit(depth, gpair, p_fmat, fwork_set, p_tree);
-      // reset position after split
+      // reset position after split, 这个函数功能最简单, 只是增加那些可能作为分割点的 feature
       this->ResetPositionAfterSplit(p_fmat, *p_tree);
+      // 把之前的 leaf node， 的左右孩子作为新的 fresh leaf nodes
       this->UpdateQueueExpand(*p_tree);
       // if nothing left to be expand, break
       if (qexpand.size() == 0) break;
     }
     for (size_t i = 0; i < qexpand.size(); ++i) {
       const int nid = qexpand[i];
+      // learning_rate 就是在这里作用的
       (*p_tree)[nid].set_leaf(p_tree->stat(nid).base_weight * param.learning_rate);
     }
   }
@@ -229,6 +240,7 @@ class HistMaker: public BaseMaker {
       SplitEntry &best = sol[wid];
       TStats &node_sum = wspace.hset[0][num_feature + wid * (num_feature + 1)].data[0];
       for (size_t i = 0; i < fset.size(); ++i) {
+        // 只通过直方图就可以单机计算出 best splits
         EnumerateSplit(this->wspace.hset[0][i + wid * (num_feature+1)],
                        node_sum, fset[i], &best, &left_sum[wid]);
       }
@@ -240,6 +252,7 @@ class HistMaker: public BaseMaker {
       const TStats &node_sum = wspace.hset[0][num_feature + wid * (num_feature + 1)].data[0];
       this->SetStats(p_tree, nid, node_sum);
       // set up the values
+      // loss change
       p_tree->stat(nid).loss_chg = best.loss_chg;
       // now we know the solution in snode[nid], set split
       if (best.loss_chg > rt_eps) {
@@ -377,6 +390,7 @@ class CQHistMaker: public HistMaker<TStats> {
   }
   void ResetPositionAfterSplit(DMatrix *p_fmat,
                                const RegTree &tree) override {
+    // only update the features that can be split feature
     this->GetSplitSet(this->qexpand, tree, &fsplit_set);
   }
   void ResetPosAndPropose(const std::vector<bst_gpair> &gpair,
@@ -385,17 +399,25 @@ class CQHistMaker: public HistMaker<TStats> {
                           const RegTree &tree) override {
     const MetaInfo &info = p_fmat->info();
     // fill in reverse map
-    feat2workindex.resize(tree.param.num_feature);
+    // std::vector<int> feat2workindex;
+    feat2workindex.resize(tree.param.num_feature); 
+    // 都用 -1 先填充 ？ 
     std::fill(feat2workindex.begin(), feat2workindex.end(), -1);
+    // set of index from fset that are current work set
+    // std::vector<bst_uint> work_set;
     work_set.clear();
     for (size_t i = 0; i < fset.size(); ++i) {
+      // 这里 helper ？？？
+      // Type == 2 ？？？
       if (feat_helper.Type(fset[i]) == 2) {
+
         feat2workindex[fset[i]] = static_cast<int>(work_set.size());
         work_set.push_back(fset[i]);
       } else {
         feat2workindex[fset[i]] = -2;
       }
     }
+    // Type == 2 的特征数
     const size_t work_set_size = work_set.size();
 
     sketchs.resize(this->qexpand.size() * work_set_size);
@@ -454,11 +476,13 @@ class CQHistMaker: public HistMaker<TStats> {
     this->wspace.cut.clear();
     this->wspace.rptr.clear();
     this->wspace.rptr.push_back(0);
-    for (size_t wid = 0; wid < this->qexpand.size(); ++wid) {
-      for (size_t i = 0; i < fset.size(); ++i) {
+    for (size_t wid = 0; wid < this->qexpand.size(); ++wid) {  // every leaf node
+      for (size_t i = 0; i < fset.size(); ++i) { // every feature
         int offset = feat2workindex[fset[i]];
         if (offset >= 0) {
+	  // work_set_size is the number of Type2 features
           const WXQSketch::Summary &a = summary_array[wid * work_set_size + offset];
+	  // every leaf node and every feature has a.size candidates split respectively
           for (size_t i = 1; i < a.size; ++i) {
             bst_float cpt = a.data[i].value - rt_eps;
             if (i == 1 || cpt > this->wspace.cut.back()) {
@@ -481,6 +505,7 @@ class CQHistMaker: public HistMaker<TStats> {
         }
       }
       // reserve last value for global statistics
+      // 每一个 leaf node 又多 push 了一个进去
       this->wspace.cut.push_back(0.0f);
       this->wspace.rptr.push_back(static_cast<unsigned>(this->wspace.cut.size()));
     }
@@ -649,30 +674,39 @@ class CQHistMaker: public HistMaker<TStats> {
 template<typename TStats>
 class GlobalProposalHistMaker: public CQHistMaker<TStats> {
  protected:
+  // 这个是真正在用的函数
   void ResetPosAndPropose(const std::vector<bst_gpair> &gpair,
                           DMatrix *p_fmat,
                           const std::vector<bst_uint> &fset,
                           const RegTree &tree) override {
+    LOG(INFO) << "I'm in global proposal hist maker ResetPosAndPropose function";
     if (this->qexpand.size() == 1) {
+      // assert: there is only the root node to be expand
       cached_rptr_.clear();
       cached_cut_.clear();
     }
     if (cached_rptr_.size() == 0) {
-      CHECK_EQ(this->qexpand.size(), 1);
+      CHECK_EQ(this->qexpand.size(), 1); // 只有 root 节点需要 expand
+      // 只有 root 节点的时候， 调用父类的 ResetPosAndPropose function
+      // 这里面有一次 allReduce 操作
       CQHistMaker<TStats>::ResetPosAndPropose(gpair, p_fmat, fset, tree);
+      // 这两个东西只需要在最开始的时候计算一次，后面永远不用计算了
       cached_rptr_ = this->wspace.rptr;
       cached_cut_ = this->wspace.cut;
     } else {
       this->wspace.cut.clear();
       this->wspace.rptr.clear();
       this->wspace.rptr.push_back(0);
-      for (size_t i = 0; i < this->qexpand.size(); ++i) {
+      // wspace.rptr 就是从 0 开始的 cached_rptr
+      for (size_t i = 0; i < this->qexpand.size(); ++i) { // 需要扩展的叶子节点
         for (size_t j = 0; j < cached_rptr_.size() - 1; ++j) {
           this->wspace.rptr.push_back(
-              this->wspace.rptr.back() + cached_rptr_[j + 1] - cached_rptr_[j]);
+              this->wspace.rptr.back() + cached_rptr_[j + 1] - cached_rptr_[j]); // 一直累计着插
         }
-        this->wspace.cut.insert(this->wspace.cut.end(), cached_cut_.begin(), cached_cut_.end());
+        this->wspace.cut.insert(this->wspace.cut.end(), cached_cut_.begin(), cached_cut_.end()); // 反复插入
       }
+      // 注意，这里有一个内存瓶颈。(feature 个数 + 1) * 每层最大的叶子节点数
+      // 假设 10 层的树结构，可能最后一层要扩展 1024 个 qexpand，这个时候特征数是 1亿，肯定挂掉
       CHECK_EQ(this->wspace.rptr.size(),
                (fset.size() + 1) * this->qexpand.size() + 1);
       CHECK_EQ(this->wspace.rptr.back(), this->wspace.cut.size());
@@ -680,6 +714,7 @@ class GlobalProposalHistMaker: public CQHistMaker<TStats> {
   }
 
   // code to create histogram
+  // 覆盖了父类的方法！
   void CreateHist(const std::vector<bst_gpair> &gpair,
                   DMatrix *p_fmat,
                   const std::vector<bst_uint> &fset,
